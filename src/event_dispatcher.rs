@@ -107,15 +107,11 @@ impl EventDispatcher {
             } => {
                 self.process_mouse_state(device, state);
 
-                if !self.active {
-                    return true;
-                }
-
-                if x != 0 || y != 0 {
+                if self.active && (x != 0 || y != 0) {
                     self.tx.send(Event::MouseMove(x, y)).unwrap();
                 }
 
-                false
+                true
             }
         }
     }
@@ -169,28 +165,23 @@ impl EventDispatcher {
     }
 
     fn process_key(&mut self, device: ic::Device, code: ic::ScanCode, state: KeyState) -> bool {
-        let changed_state = match self.key_states.insert((device, code), state) {
-            Some(old_state) => state != old_state,
-            None => true,
-        };
+        let changed_state = self
+            .key_states
+            .insert((device, code), state)
+            .map_or(true, |old_state| state != old_state);
 
         if code == self.config.toggle_key {
             if changed_state && state == KeyState::Down {
                 self.toggle_active();
             }
-
             return false;
         }
 
-        if self.active {
-            if changed_state {
-                self.tx.send(Event::Keyboard(code, state)).unwrap();
-            }
-
-            false
-        } else {
-            true
+        if self.active && changed_state {
+            self.tx.send(Event::Keyboard(code, state)).unwrap();
         }
+
+        true
     }
 
     fn process_mouse_state(&mut self, device: ic::Device, state: ic::MouseState) {

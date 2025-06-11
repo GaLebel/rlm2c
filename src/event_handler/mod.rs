@@ -59,6 +59,8 @@ pub struct Config {
     analog_mask: (bool, bool),
     analog_circularize: bool,
     mouse_button_fix: bool,
+    position_mode_range_pixels: f64, // New: Mouse movement (accumulated delta) needed for max stick deflection in position mode
+    position_mode_button: Option<MouseButton>, // New field
 
     binds: HashMap<Bind, ControllerAction>,
     dodge_binds: HashMap<DodgeAction, Bind>,
@@ -81,6 +83,8 @@ impl Default for Config {
             analog_mask: (true, true),
             analog_circularize: true,
             mouse_button_fix: false,
+            position_mode_range_pixels: 800.0, // Default: 800 pixels of movement for max stick
+            position_mode_button: Some(MouseButton::Middle), // Default to Middle button
 
             binds: HashMap::new(),
             dodge_binds: HashMap::new(),
@@ -107,6 +111,9 @@ pub struct EventHandler {
 
     analog_lock_x: f64,
     analog_lock_y: f64,
+    position_mode_active: bool, // New field
+    current_simulated_mouse_pos: (f64, f64), // New field: Accumulated mouse movement
+    position_mode_origin: (f64, f64), // New field: Mouse position when position mode activated
 
     iteration_count: i32,
     iteration_total: Duration,
@@ -154,6 +161,9 @@ impl EventHandler {
 
             analog_lock_x: 0.0,
             analog_lock_y: 0.0,
+            position_mode_active: false, // Initialize new fields
+            current_simulated_mouse_pos: (0.0, 0.0),
+            position_mode_origin: (0.0, 0.0),
 
             iteration_count: 0,
             iteration_total: Duration::from_secs(0),
@@ -232,6 +242,23 @@ impl EventHandler {
     }
 
     fn handle_bind(&mut self, bind: Bind, state: KeyState) {
+        // Check if the position mode button was pressed or released
+        if let Some(pos_button) = self.config.position_mode_button {
+            if bind == Bind::Mouse(pos_button) {
+                if state == KeyState::Down {
+                    self.position_mode_active = true;
+                    self.position_mode_origin = self.current_simulated_mouse_pos; // Save origin on press
+                    self.mouse_samples.clear(); // Clear velocity samples to avoid conflict
+                    debug!("Position mode active");
+                } else { // KeyState::Up
+                    self.position_mode_active = false;
+                    // Optionally recenter the stick immediately on release
+                    // self.set_analog(0.0, 0.0);
+                    debug!("Position mode inactive");
+                }
+            }
+        }
+
         let controller_button = match self.config.binds.get(&bind) {
             Some(ControllerAction::Button(controller_button)) => controller_button,
             Some(ControllerAction::Analog(x, y)) => {
@@ -331,13 +358,21 @@ impl EventHandler {
     }
 
     fn handle_mouse_move(&mut self, x: i32, y: i32) {
-        let now = Instant::now();
-        self.mouse_samples.push_back((x, y, now));
+        // Always update the simulated mouse position by accumulating deltas
+        self.current_simulated_mouse_pos.0 += x as f64;
+        self.current_simulated_mouse_pos.1 += y as f64;
+
+        if self.position_mode_active{
+            let now = Instant::now();
+            self.mouse_samples.push_back((x, y, now));
+        }
     }
 
+    #[allow(unused_assignments)]
     fn update_analog(&mut self) {
         let now = Instant::now();
 
+        // Remove old mouse samples from the velocity calculation window
         loop {
             let sample = match self.mouse_samples.front() {
                 Some(sample) => sample,
@@ -351,51 +386,91 @@ impl EventHandler {
             }
         }
 
-        if !self.analog_locked || now > self.analog_lock_end {
-            self.analog_locked = false;
+        let mut target_analog_x = 0.0;
+        let mut target_analog_y = 0.0;
 
-            // let window = self.config.sample_window.as_secs_f64();
-            let mut mouse_vel = (0.0, 0.0);
+        // --- Determine the analog target based on mode ---
+        if self.position_mode_active {
+            // --- Position Mode ---
+            let mut offset_x = self.current_simulated_mouse_pos.0 - self.position_mode_origin.0;
+            let mut offset_y = self.current_simulated_mouse_pos.1 - self.position_mode_origin.1;
 
-            /*
-            let dt_offset = if self.mouse_samples.len() > 0 {
-                let sample = self.mouse_samples[0];
-                if (now - sample.2).as_secs_f64() * 1000.0 < 1.0 {
-                    (now - sample.2).as_secs_f64()
-                } else {
-                    0.0005
-                }
-            } else {
-                0.0
-            };
-            */
+            let dist_sq = offset_x.powi(2) + offset_y.powi(2);
+            let max_dist = self.config.position_mode_range_pixels;
+            let max_dist_sq = max_dist.powi(2);
+
+            // Check if the current offset distance exceeds the maximum allowed distance
+            // (Using squared distance avoids a sqrt call unless necessary)
+            if max_dist > 0.0 && dist_sq > max_dist_sq {
+                let dist = dist_sq.sqrt();
+                let reduction_factor = max_dist / dist; // This will be < 1.0
+
+                // Calculate how much the offset needs to be reduced
+                let offset_reduction_x = offset_x * (1.0 - reduction_factor);
+                let offset_reduction_y = offset_y * (1.0 - reduction_factor);
+
+                // Adjust the simulated mouse position back towards the origin
+                // This effectively clamps the simulated position's *offset*
+                // to the max_dist circle around the origin.
+                self.current_simulated_mouse_pos.0 -= offset_reduction_x;
+                self.current_simulated_mouse_pos.1 -= offset_reduction_y;
+
+                // Recalculate the offset using the new, limited simulated position
+                offset_x = self.current_simulated_mouse_pos.0 - self.position_mode_origin.0;
+                offset_y = self.current_simulated_mouse_pos.1 - self.position_mode_origin.1;
+                // Now offset_x^2 + offset_y^2 should be approximately max_dist^2
+            }
+
+            // Map the (potentially limited) offset to the analog stick range (-1.0 to 1.0)
+            // If max_dist is 0, the target analog will be offset/0, resulting in Inf or NaN.
+            // The clamp below handles this by clamping to 0.0.
+            target_analog_x = offset_x / max_dist;
+            target_analog_y = offset_y / max_dist; // Y is not inverted here
+
+            // Clamp values to -1.0 to 1.0 range (handles potential floating point errors and max_dist=0)
+            target_analog_x = target_analog_x.clamp(-1.0, 1.0);
+            target_analog_y = target_analog_y.clamp(-1.0, 1.0);
+
+        } else if !self.analog_locked || now > self.analog_lock_end {
+            // --- Velocity Mode (Original Logic) ---
+            // This block is active if position mode is off AND (analog lock is off OR lock has expired)
+            self.analog_locked = false; // Ensure lock is considered off if we're in velocity mode
+
+            let mut mouse_vel = (0.0, 0.0); // This will calculate the velocity over the sample window
 
             for &(x, y, _) in self.mouse_samples.iter() {
-                // let dt = ((now - t).as_secs_f64() - dt_offset) / window;
-
                 mouse_vel.0 += x as f64;
                 mouse_vel.1 += y as f64;
             }
 
-            // TODO: proper analog binds
+            // Apply analog mask based on config
             if !self.config.analog_mask.0 {
                 mouse_vel.0 = 0.0;
             }
-
             if !self.config.analog_mask.1 {
                 mouse_vel.1 = 0.0;
             }
 
+            // Calculate analog target based on velocity and sensitivity
             let multiplier =
-                self.config.sensitivity / (1e4 * self.config.sample_window.as_secs_f64());
+                self.config.sensitivity / (1e4 * self.config.sample_window.as_secs_f64()); // Original velocity multiplier
 
-            self.set_analog(
-                mouse_vel.0 as f64 * multiplier,
-                -mouse_vel.1 as f64 * multiplier,
-            );
+            target_analog_x = mouse_vel.0 * multiplier;
+            target_analog_y = mouse_vel.1 * multiplier; // Y is not inverted here yet
+
+            // Velocity mode naturally centers when mouse stops due to mouse_vel becoming zero.
+
         } else {
+            // --- Analog Locked Mode (Dodge, Analog binds from config) ---
+            // Keep the locked position set previously by handle_bind or handle_jump.
             self.set_analog(self.analog_lock_x, self.analog_lock_y);
+            return; // Skip the general set_analog call below as it's handled by the lock
         }
+
+        // Apply the calculated analog values (from either Position or Velocity mode)
+        // Note: The Y value is negated here to match typical screen coordinates (Y increases downwards)
+        // to stick coordinates (Y increases upwards). Adjust if your mouse Y is naturally inverted.
+        self.set_analog(target_analog_x, -target_analog_y);
     }
 
     fn set_analog(&mut self, x: f64, y: f64) {

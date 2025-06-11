@@ -1,0 +1,56 @@
+Config(
+    event_dispatcher: (
+        // The key used to switch from normal operation to controller emulation:
+        // Grave (= tilde) is the key to the left of number 1 on the number row,
+        // and should work well for most cases
+        toggle_key: Grave,
+    ),
+
+    event_handler: (
+        // Unitless coefficient for Velocity Mode: scale 0 -> +inf
+        // Controls how much mouse VELOCITY is needed for maximum stick angle.
+        sensitivity: 3.0, // @ 3200 DPI = 1.32
+
+        // The window over which mouse velocity is estimated (for Velocity Mode):
+        //     Lower  -> less input latency
+        //     Higher -> greater accuracy and smoother stick position estimation
+        sample_window: (secs: 0, nanos: 4500000), // 20000000 20ms (increased for smoothness based on your previous config)
+
+        // The maximum duration to spin-loop for before running a controller update
+        // if no input is recieved (required for correct velocity estimation)
+        spin_period: (secs: 0, nanos: 2000000), // 2ms
+
+        // Audio alert when the current analog stick deflection is above the threshold
+        // (This applies regardless of whether in Velocity or Position mode)
+        oversteer_alert_enabled: true,
+        oversteer_alert_threshold: 1.8,
+        oversteer_alert: (volume: 0.05, frequency: 440),
+
+        // X/Y stick motion mask
+        // (true, false) -> mouse X controls stick X, mouse Y is ignored
+        // (true, true)  -> mouse X controls stick X, mouse Y controls stick Y (pitch/air roll)
+        analog_mask: (true, true), // Using both X and Y based on your provided config
+
+        // Enable a dodgy hack to fix mouse button state tracking for Left/Right steer binds
+        mouse_button_fix: true,
+
+        // --- Position Mode Configuration ---
+        // Accumulated mouse movement (in pixels) required from the origin
+        // to reach maximum analog stick deflection in Position Mode.
+        position_mode_range_pixels: 400.0, // Adjust this value to change sensitivity in Position Mode
+
+        // The mouse button that activates Position Mode when held down.
+        // Set to None to disable Position Mode.
+        position_mode_button: Some(Button5), // Example: Middle Mouse Button
+
+        // --- Input Bindings ---
+        // Keys are bound to controller buttons or analog values
+        // See src/types.rs for available options.
+        // Note: If a mouse button is used for position_mode_button *and* listed here,
+        // it will trigger both actions simultaneously when held.
+        binds: {
+            // Required binding to make the game detect the joystick emulation
+            Keyboard(Equals): Button(Start)
+        },
+    )
+)
